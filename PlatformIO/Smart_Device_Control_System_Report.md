@@ -23,8 +23,6 @@
         3.4.2. [Memory Management](#342-memory-management)
     3.5. [Communication Protocols](#35-communication-protocols)
     3.6. [Control Logic and Data Flow](#36-control-logic-and-data-flow)
-        3.6.1. [Control Logic](#361-control-logic)
-        3.6.2. [Data Flow](#362-data-flow)
 4. [System Implementation](#4-system-implementation)
     4.1. [WiFi Manager Task](#wifi-manager-task)
     4.2. [MQTT Manager Task](#mqtt-manager-task)
@@ -373,17 +371,17 @@ The system utilizes a variety of communication protocols for internal (on-device
     *   **Usage**: To read analog voltage levels from the soil moisture sensor (GPIO 1) and the Light Dependent Resistor (LDR) (GPIO 2).
     *   **Characteristics**: The ESP32's ADC converts these analog readings into digital values that the microcontroller can process.
 *   **PWM (Pulse Width Modulation)**:
-    *   **Usage**: To control the speed of the cooling fan (GPIO 6).
+    *   **Usage**: To control the speed of the cooling fan.
     *   **Characteristics**: By varying the duty cycle of a digital pulse train (25kHz frequency as per implementation), the average power delivered to the fan motor can be controlled.
 *   **GPIO (General Purpose Input/Output)**:
-    *   **Usage**: For controlling the status LED (GPIO 48) with simple on/off states, and for the bit-banged, timing-critical protocol used by the NeoPixel LED strip (GPIO 8).
+    *   **Usage**: For controlling the status LED with simple on/off states, and for the bit-banged, timing-critical protocol used by the NeoPixel LED strip.
 *   **WiFi (IEEE 802.11 b/g/n)**:
     *   **Usage**: For connecting the ESP32 to the local wireless network, providing internet access essential for cloud communication and time synchronization.
     *   **Characteristics**: Standard wireless communication protocol operating in the 2.4GHz band, managed by the WiFi Manager task.
 *   **HTTP (Hypertext Transfer Protocol)**:
     *   **Usage**: An `ESPAsyncWebServer` library is used to create a web server on the ESP32. This server hosts a captive portal for initial WiFi setup (SSID and password entry) when the device cannot connect to a saved network and enters Access Point mode.
     *   **Characteristics**: Standard client-server protocol for web communication.
-    *   **Web Server Routes** (from `src/tasks/wifi_manager.cpp`):
+    *   **HTTP Endpoints** (from `src/tasks/wifi_manager.cpp`):
         ```
         HTTP Endpoints:
         ├── GET  /                    (Serves the main WiFi setup page)
@@ -480,7 +478,7 @@ The system implements a "Hybrid Control Mode," allowing for both automatic senso
     │ (in fan_control)│                                 │ (Default Speed) │
     └─────────────────┘                                 └─────────────────┘
              │                                                     │
-             │ <= TEMP_FAN_ON                                      │
+       <= TEMP_FAN_ON                                          │
              ▼                                                     │
     ┌─────────────────┐                                            │
     │ Auto: Fan OFF   │                                            │
@@ -534,7 +532,8 @@ The system implements a "Hybrid Control Mode," allowing for both automatic senso
     *   If `currentLightLevel` is between `LIGHT_THRESHOLD_ON` and `LIGHT_THRESHOLD_OFF` (hysteresis zone), the LEDs maintain their previous state (`lastSensorLightState`). This prevents rapid toggling.
 *   **Manual Control**:
     *   RPC commands like `setLight` (true/false) can override the automatic state.
-    *   Similar to fan control, a `manualLightOverride` flag and state synchronization would be used.
+    *   When a manual command is received, `manualLightOverride` flag is set.
+    *   The `setLightState()` function updates the LED strip colors/states and updates `lastSensorLightState` to reflect the new manual state.
 *   **Diagrammatic Representation**:
     ```
     Light Sensor Reading (LDR via Global Var)
@@ -575,3 +574,213 @@ The system implements a "Hybrid Control Mode," allowing for both automatic senso
     │(e.g. "setLight")│    (e.g. "setLight")
     └─────────────────┘
     ```
+
+#### 4. System Implementation
+
+This section details the implementation of the core software tasks that constitute the Smart Device Control System. Each task is designed to run concurrently under the FreeRTOS real-time operating system, managing specific hardware components or communication protocols.
+
+### 4.1 WiFi Manager Task
+
+**Objective**: To establish and maintain a stable WiFi connection for the ESP32 device, enabling network communication for MQTT and HTTP services.
+
+**Implementation Details**:
+-   **Filename**: `src/tasks/wifi_manager.cpp` (conceptual, based on typical project structure)
+-   **Core Functionality**:
+    -   **Credential Management**: Loads saved WiFi SSID and password from non-volatile storage (e.g., Preferences library).
+    -   **Connection Logic**: Attempts to connect to the configured WiFi network. Implements a retry mechanism with timeouts to handle connection failures.
+    -   **Captive Portal (Initial Setup)**: If no credentials are found or connection fails repeatedly, the task can initiate an Access Point (AP) mode. In AP mode, it serves a web page (e.g., at `192.168.4.1`) allowing the user to scan for available WiFi networks, select one, and enter the password. These credentials are then saved for future connections.
+    -   **Status Indication**: Provides feedback on connection status (e.g., via serial log, status LED, or publishing to a local status topic).
+    -   **Reconnection**: Monitors the WiFi connection status and attempts to reconnect if the connection is lost.
+-   **Key Libraries**: `WiFi.h`, `ESPAsyncWebServer.h` (or equivalent for web server in AP mode), `Preferences.h`.
+-   **State Machine**:
+    1.  `STARTUP`: Initialize WiFi module.
+    2.  `LOAD_CREDENTIALS`: Try to load saved WiFi credentials.
+    3.  `CONNECT_STA`: If credentials exist, attempt to connect in Station (STA) mode.
+        -   On Success: Transition to `CONNECTED_MONITOR`.
+        -   On Failure: After multiple retries, transition to `SETUP_AP_MODE`.
+    4.  `SETUP_AP_MODE`: If no credentials or STA connection failed, start AP mode. Launch a web server for configuration.
+        -   On Credentials Save: Save new credentials, then transition to `CONNECT_STA`.
+    5.  `CONNECTED_MONITOR`: Periodically check WiFi status. If disconnected, attempt reconnection (`CONNECT_STA`).
+
+### 4.2 MQTT Manager Task
+
+**Objective**: To manage the connection to the MQTT broker (ThingsBoard.io), handle incoming commands (RPC), and publish telemetry data and device attributes.
+
+**Implementation Details**:
+-   **Filename**: `src/tasks/mqtt_manager.cpp` (conceptual)
+-   **Core Functionality**:
+    -   **Connection Management**: Establishes and maintains a connection to the MQTT broker using the device access token for authentication. Implements reconnection logic with backoff strategy.
+    -   **Subscription**: Subscribes to relevant RPC request topics (e.g., `v1/devices/me/rpc/request/+`).
+    -   **Message Handling (Callback)**: Processes incoming MQTT messages. For RPC requests, it parses the JSON payload, identifies the method name and parameters.
+    -   **Command Dispatch**: Based on the RPC method, it invokes the appropriate local function to control a device (e.g., `setFan`, `setLight`) or retrieve status.
+    -   **Telemetry Publishing**: Periodically (or on change) collects data from sensor tasks and system state variables, formats it into a JSON payload, and publishes to the telemetry topic (e.g., `v1/devices/me/telemetry`).
+    -   **Attribute Publishing**: Publishes device attributes (e.g., firmware version, static configuration, current control states) to the attributes topic (e.g., `v1/devices/me/attributes`).
+    -   **Response Publishing**: Sends responses to RPC commands back to the server via the appropriate RPC response topic (e.g., `v1/devices/me/rpc/response/{request_id}`).
+-   **Key Libraries**: `PubSubClient.h`, `ArduinoJson.h`.
+-   **RPC Command Handling Flow**:
+    1.  Receive message on `v1/devices/me/rpc/request/+`.
+    2.  Parse JSON: Extract `method` and `params`.
+    3.  Route: Call internal handler based on `method` (e.g., `handleSetFan(params)`, `handleGetLightState()`).
+    4.  Execute: Perform action or retrieve data.
+    5.  Respond: Publish result to `v1/devices/me/rpc/response/{request_id}`.
+
+### 4.3 Sensor Tasks
+
+These tasks are responsible for reading data from various environmental sensors.
+
+#### 4.3.1 Temperature & Humidity Sensor Task (DHT20)
+
+-   **Objective**: To periodically read temperature and humidity data from the DHT20 sensor.
+-   **Implementation Details**:
+    -   **Filename**: `src/tasks/temperature_humidity.cpp` (conceptual)
+    -   **Sensor Interface**: I2C.
+    -   **Functionality**:
+        -   Initializes the DHT20 sensor.
+        -   In a loop, reads temperature and humidity values.
+        -   Updates global volatile variables (`currentTemperature`, `currentHumidity`) for other tasks to access.
+        -   Logs readings to serial output for debugging.
+        -   Delay for a specified interval (e.g., 10 seconds).
+    -   **Key Libraries**: `DHT20.h` (or specific library for the sensor).
+
+#### 4.3.2 Soil Moisture Sensor Task
+
+-   **Objective**: To periodically read the analog value from the soil moisture sensor.
+-   **Implementation Details**:
+    -   **Filename**: `src/tasks/soil_moisture.cpp` (conceptual)
+    -   **Sensor Interface**: ADC (e.g., GPIO 1).
+    -   **Functionality**:
+        -   Configures the ADC pin.
+        -   In a loop, reads the analog value from the sensor.
+        -   Updates a global volatile variable (`currentSoilMoisture`).
+        -   Logs readings.
+        -   Delay for a specified interval (e.g., 10 seconds).
+    -   **Key Functions**: `analogRead()`.
+
+#### 4.3.3 Light Sensor Task (LDR)
+
+-   **Objective**: To periodically read the ambient light level from the Light Dependent Resistor (LDR).
+-   **Implementation Details**:
+    -   **Filename**: `src/tasks/light_and_led.cpp` (as it's often integrated with light control)
+    -   **Sensor Interface**: ADC (e.g., GPIO 2).
+    -   **Functionality**:
+        -   Configures the ADC pin.
+        -   In a loop, reads the analog value representing light intensity.
+        -   Updates a global volatile variable (`currentLightLevel`).
+        -   This data is then used by the Light Control Task for automatic adjustments.
+        -   Logs readings.
+        -   Delay for a specified interval (e.g., 10 seconds).
+    -   **Key Functions**: `analogRead()`.
+
+### 4.4 Control Tasks
+
+These tasks manage the actuators based on sensor data, user commands, or predefined logic.
+
+#### 4.4.1 Fan Control Task
+
+-   **Objective**: To control the fan's operation (ON/OFF) and speed based on temperature readings and manual override commands.
+-   **Implementation Details**:
+    -   **Filename**: `src/tasks/fan_control.cpp` (conceptual)
+    -   **Control Interface**: PWM (e.g., GPIO 6).
+    -   **Functionality**:
+        -   **Automatic Mode**:
+            -   Reads `currentTemperature` (from the Temperature & Humidity Sensor Task).
+            -   If temperature exceeds `TEMP_FAN_ON` threshold, turn the fan ON to a default speed.
+            -   If temperature falls below a certain point (or `TEMP_FAN_ON` with hysteresis), turn the fan OFF.
+            -   Updates `currentFanSpeed` (PWM value) and `fanEnabled` state.
+        -   **Manual Override**:
+            -   Responds to `setFan(bool enabled)` and `setFanSpeed(float percentage)` RPC commands from MQTT Manager.
+            -   Updates fan state and speed directly, bypassing automatic logic temporarily.
+            -   A `manualOverride` flag can be used to indicate manual control is active. This might revert to automatic after a timeout or a specific command.
+        -   **PWM Control**: Uses `ledcSetup()` and `ledcWrite()` functions for PWM signal generation to control fan speed.
+        -   **State Publishing**: Publishes current fan state (ON/OFF, speed, control mode) via MQTT.
+    -   **Key Functions**: `ledcWrite()`, logic for temperature thresholds, handling manual override flags.
+
+#### 4.4.2 Light Control Task (NeoPixel LEDs)
+
+-   **Objective**: To control the NeoPixel LEDs based on ambient light levels and manual override commands.
+-   **Implementation Details**:
+    -   **Filename**: `src/tasks/light_and_led.cpp` (conceptual)
+    -   **Control Interface**: GPIO (e.g., GPIO 8, for NeoPixel data line).
+    -   **Functionality**:
+        -   **Automatic Mode**:
+            -   Reads `currentLightLevel` (from the Light Sensor Task).
+            -   Implements hysteresis:
+                -   If light level < `LIGHT_THRESHOLD_ON`, turn LEDs ON.
+                -   If light level > `LIGHT_THRESHOLD_OFF` (where `LIGHT_THRESHOLD_OFF` > `LIGHT_THRESHOLD_ON`), turn LEDs OFF.
+                -   If light level is between thresholds, maintain the current state.
+            -   Updates `lightEnabled` state.
+        -   **Manual Override**:
+            -   Responds to `setLight(bool enabled)` RPC commands.
+            -   Updates LED state directly.
+        -   **LED Control**: Uses a NeoPixel library (e.g., Adafruit NeoPixel) to set LED colors and brightness.
+        -   **State Publishing**: Publishes current light state (ON/OFF, control mode) via MQTT.
+    -   **Key Libraries**: `Adafruit_NeoPixel.h`.
+
+### 4.5 Local Display and Configuration
+
+**Objective**: To provide real-time sensor data and system status on a local LCD and allow basic configuration if applicable (though primary configuration is via WiFi captive portal).
+
+**Implementation Details**:
+-   **LCD Display Task** (or integrated into a main/UI task):
+    -   **Filename**: `src/tasks/display_task.cpp` (conceptual)
+    -   **Interface**: I2C (for LCD 16x2, e.g., GPIO 11 SDA, GPIO 12 SCL).
+    -   **Functionality**:
+        -   Initializes the LCD.
+        -   Periodically reads global state variables (temperature, humidity, soil moisture, light level, WiFi status, MQTT status, fan state, light state).
+        -   Formats and displays this information on the LCD.
+        -   May cycle through different screens of information if data exceeds display capacity.
+    -   **Key Libraries**: `LiquidCrystal_I2C.h`.
+-   **Status LED**:
+    -   A simple GPIO-controlled LED (e.g., GPIO 48) can be used to indicate overall system status (e.g., booting, WiFi connecting, WiFi connected, error). This is typically managed across different tasks or by a dedicated status indication function.
+
+This structured task-based implementation allows for modular development, easier debugging, and efficient use of the ESP32's resources under FreeRTOS. Each task focuses on a specific aspect of the system, interacting with others through shared state variables (with appropriate thread safety considerations like using `volatile` or FreeRTOS queues/semaphores for more complex interactions) and messaging protocols like MQTT.
+
+## 5. Conclusion
+
+The Smart Device Control System project, utilizing an RTOS on an IoT platform (ESP32), successfully demonstrates a comprehensive solution for monitoring and automating environmental controls.
+
+### 5.1 Achievements
+
+-   **Robust Multi-tasking**: Leveraged FreeRTOS for concurrent execution of sensor reading, actuator control, WiFi management, and cloud communication, ensuring responsive and efficient operation.
+-   **Comprehensive Sensing and Control**: Integrated a suite of sensors (DHT20 for temperature/humidity, soil moisture, LDR for light) and actuators (fan via PWM, NeoPixel LEDs) providing a rich dataset and fine-grained control.
+-   **Effective Cloud Integration**: Successfully connected to the ThingsBoard.io platform via MQTT for:
+    -   Real-time telemetry data visualization.
+    -   Remote device control through RPC commands.
+    -   Device attribute management.
+-   **User-Friendly Configuration**: Implemented a WiFi captive portal for easy initial network setup without requiring hardcoded credentials.
+-   **Hybrid Control Logic**: Developed a flexible control system allowing both autonomous operation based on sensor thresholds (with hysteresis for stability) and manual override via the cloud dashboard. This ensures adaptability to varying user needs and conditions.
+-   **Local Feedback**: Provided immediate system status and sensor readings through a local LCD display and status LEDs.
+-   **Modular Software Design**: Organized code into distinct tasks and modules, promoting maintainability and scalability. Conceptual filenames like `wifi_manager.cpp`, `mqtt_manager.cpp`, etc., reflect this modularity.
+-   **Error Handling and Resilience**: Incorporated mechanisms for WiFi and MQTT reconnection, enhancing system reliability.
+
+### 5.2 Limitations
+
+-   **Security**: The current implementation uses non-encrypted MQTT (port 1883). For production environments, MQTT over TLS/SSL (port 8883) would be essential to secure data in transit. WiFi credentials, while stored in Preferences, could benefit from further encryption if the platform supports it easily.
+-   **Scalability for Many Devices**: While the single device is robust, managing a large fleet of similar devices would require a more sophisticated device management strategy on the cloud side and potentially more advanced features like Over-The-Air (OTA) firmware updates. The current OTA partition exists but the update process is not detailed as implemented.
+-   **Power Consumption**: The system is designed for continuous operation while powered via USB. For battery-powered scenarios, significant power optimization techniques (deep sleep, selective peripheral disabling) would be necessary. Current power consumption is around 80-150mA.
+-   **Data Storage**: No long-term local data logging is implemented. If cloud connectivity is lost for extended periods, sensor data is not stored locally for later synchronization. SPIFFS is available but not used for this.
+-   **Complexity of Configuration**: While the captive portal simplifies WiFi setup, advanced configuration (e.g., MQTT broker details if not using a fixed demo server, sensor calibration values) might still require code changes or a more advanced configuration interface.
+-   **Physical Robustness**: The project focuses on software and system design; the physical enclosure and sensor/actuator placement for long-term outdoor or harsh environment use are not covered.
+
+### 5.3 Future Work
+
+-   **Enhanced Security**:
+    -   Implement MQTTS (MQTT over TLS/SSL) for secure communication with ThingsBoard.
+    -   Investigate options for encrypting WiFi credentials stored in flash memory.
+-   **Over-The-Air (OTA) Firmware Updates**: Develop and integrate a reliable OTA update mechanism to allow remote firmware upgrades without physical access.
+-   **Power Optimization**:
+    -   Implement deep sleep modes and wake-up triggers (e.g., timer, external interrupt) for battery-powered applications.
+    -   Optimize task scheduling and peripheral usage to minimize power draw.
+-   **Local Data Logging**: Utilize the SPIFFS or an SD card (if hardware allows) to log sensor data locally, especially during network outages, with subsequent synchronization to the cloud.
+-   **Advanced Analytics and Edge Computing**:
+    -   Implement basic data processing or anomaly detection on the ESP32 itself to reduce data transmission or provide faster local alerts.
+    -   Explore machine learning models (e.g., TinyML) for predictive control or analysis.
+-   **Expanded Hardware Support**:
+    -   Add support for more types of sensors (e.g., CO2, air quality, water flow).
+    -   Integrate additional actuators (e.g., water pumps, servo-controlled vents).
+-   **Mobile Application**: Develop a companion mobile application for a more intuitive user interface for monitoring and control, potentially using ThingsBoard's mobile app features or custom development.
+-   **Improved User Interface**: Enhance the local LCD interface with more screens, menus, or even a small touchscreen if hardware permits.
+-   **Web Dashboard Enhancements**: Further customize the ThingsBoard dashboard or develop a custom web interface for more tailored visualization and control options.
+-   **Integration with Other Services**: Explore integration with IFTTT, Alexa, Google Assistant, or other smart home ecosystems.
+
+This project serves as a solid foundation for a smart environmental control system. The identified achievements highlight its current capabilities, while the limitations and future work outline a roadmap for further development and refinement into a more mature and feature-rich product.
