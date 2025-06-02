@@ -282,7 +282,7 @@ void publisherTask(void *pvParameters) {
             ESP_LOGW(TAG, "MQTT client not connected. Attempting to reconnect...");
         }
 
-        vTaskDelay(pdMS_TO_TICKS(10000));
+        vTaskDelay(pdMS_TO_TICKS(5000));
     }
 }
 

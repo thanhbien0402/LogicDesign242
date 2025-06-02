@@ -13,6 +13,6 @@ void TaskSoilMoisture(void *pvParameters) {
     
     ESP_LOGI(TAG, "Soil Moisture: %d", soilValue);
 
-    vTaskDelay(pdMS_TO_TICKS(10000)); // Delay for 1 second
+    vTaskDelay(pdMS_TO_TICKS(5000)); // Delay for 1 second
   }
 }

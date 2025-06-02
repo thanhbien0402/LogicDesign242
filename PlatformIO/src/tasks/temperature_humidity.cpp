@@ -19,6 +19,6 @@ void TaskTemperature_Humidity(void *pvParameters){
     ESP_LOGI(TAG, "Temperature: %.1f °C", temperature);
     ESP_LOGI(TAG, "Humidity: %.1f %%", humidity);
    
-    vTaskDelay(pdMS_TO_TICKS(10000)); // Use constant to avoid stack calculations
+    vTaskDelay(pdMS_TO_TICKS(5000)); // Use constant to avoid stack calculations
   }
 }

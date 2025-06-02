@@ -147,6 +147,6 @@ void TaskLightAndLED(void *pvParameters) {
     // Note: Manual control via dashboard button (setLightState) can override anytime
     // and the sensor will continue monitoring for the next automatic change
 
-    vTaskDelay(pdMS_TO_TICKS(10000)); // Check sensor every 2 seconds
+    vTaskDelay(pdMS_TO_TICKS(5000)); // Check sensor every 2 seconds
   }
 }
