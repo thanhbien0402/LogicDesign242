@@ -1,5 +1,5 @@
 ﻿
-# ESP32 Smart Garden IoT System
+# ESP32 Smart IoT System
 
 A comprehensive IoT solution for smart garden monitoring and control using ESP32, integrated with ThingsBoard.io for cloud monitoring and remote control.
 
